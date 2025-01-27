@@ -391,19 +391,8 @@ pub fn main() !void {
     var arena = ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
 
-    // Get arguments
-    const args = try std.process.argsAlloc(gpa.allocator());
-    defer std.process.argsFree(gpa.allocator(), args);
-
-    if (args.len != 2) {
-        std.debug.print("Usage: {s} <toml_file>\n", .{args[0]});
-        std.process.exit(1);
-    }
-
-    const file_path = args[1];
-
     // Read the file
-    const file = try std.fs.cwd().openFile(file_path, .{});
+    const file = try std.fs.cwd().openFile("./.config/zduel.toml", .{});
     defer file.close();
 
     const file_size = try file.getEndPos();
