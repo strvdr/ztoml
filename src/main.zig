@@ -74,26 +74,43 @@ pub const Parser = struct {
             self.index += 1;
         }
     }
-
     fn parseTableHeader(self: *Self, root: *StringHashMap(TomlValue)) !void {
         self.index += 1; // Skip '['
         self.skipWhitespace();
 
         var name = ArrayList(u8).init(self.arena.allocator());
+        var in_table_name = true;
 
-        while (self.index < self.source.len and self.source[self.index] != ']') {
-            try name.append(self.source[self.index]);
-            self.index += 1;
+        while (self.index < self.source.len and in_table_name) {
+            const c = self.source[self.index];
+            switch (c) {
+                ']' => {
+                    in_table_name = false;
+                    self.index += 1;
+                },
+                ' ', '\t' => {
+                    try name.append(c);
+                    self.index += 1;
+                },
+                else => {
+                    try name.append(c);
+                    self.index += 1;
+                },
+            }
         }
 
-        if (self.index >= self.source.len) {
+        if (in_table_name) {
             return TomlError.UnexpectedEOF;
         }
 
-        self.index += 1; // Skip ']'
+        // Trim any trailing whitespace from the table name
+        var table_name = try name.toOwnedSlice();
+        while (table_name.len > 0 and (table_name[table_name.len - 1] == ' ' or table_name[table_name.len - 1] == '\t')) {
+            table_name = table_name[0 .. table_name.len - 1];
+        }
 
         const table = StringHashMap(TomlValue).init(self.arena.allocator());
-        try root.put(try name.toOwnedSlice(), TomlValue{ .data = .{ .Table = table } });
+        try root.put(table_name, TomlValue{ .data = .{ .Table = table } });
     }
 
     fn parseKeyValue(self: *Self, table: *StringHashMap(TomlValue)) !void {
@@ -108,9 +125,9 @@ pub const Parser = struct {
         }
 
         var key = ArrayList(u8).init(self.arena.allocator());
+        var found_equals = false;
 
         // Parse key
-        var found_equals = false;
         while (self.index < self.source.len) : (self.index += 1) {
             const c = self.source[self.index];
             switch (c) {
@@ -151,6 +168,7 @@ pub const Parser = struct {
         const value = try self.parseValue();
         try table.put(try key.toOwnedSlice(), value);
 
+        // Skip to end of line
         while (self.index < self.source.len) : (self.index += 1) {
             switch (self.source[self.index]) {
                 '\n' => {
