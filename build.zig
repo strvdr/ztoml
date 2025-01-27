@@ -10,6 +10,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    _ = b.addModule("ztoml", .{
+        .root_source_file = b.path("src/main.zig"),
+    });
+
     const exe = b.addExecutable(.{
         .name = "ztoml",
         .root_module = exe_mod,
@@ -19,14 +23,8 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
 
-    // By making the run step depend on the install step, it will be run from the
-    // installation directory rather than directly from within the cache directory.
-    // This is not necessary, however, if the application depends on other installed
-    // files, this ensures they will be present and in the expected location.
     run_cmd.step.dependOn(b.getInstallStep());
 
-    // This allows the user to pass arguments to the application in the build
-    // command itself, like this: `zig build run -- arg1 arg2 etc`
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
