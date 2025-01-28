@@ -32,6 +32,7 @@ pub const Parser = struct {
     arena: *ArenaAllocator,
     source: []const u8,
     index: usize,
+    currentTable: ?*StringHashMap(TomlValue),
 
     const Self = @This();
 
@@ -40,11 +41,13 @@ pub const Parser = struct {
             .arena = arena,
             .source = source,
             .index = 0,
+            .currentTable = null,
         };
     }
 
     pub fn parse(self: *Self) TomlError!StringHashMap(TomlValue) {
         var root = StringHashMap(TomlValue).init(self.arena.allocator());
+        self.currentTable = null; // Start with no current table
 
         while (self.index < self.source.len) {
             self.skipWhitespace();
@@ -53,7 +56,13 @@ pub const Parser = struct {
             switch (self.source[self.index]) {
                 '#' => self.skipComment(),
                 '[' => try self.parseTableHeader(&root),
-                else => try self.parseKeyValue(&root),
+                else => {
+                    if (self.currentTable) |table| {
+                        try self.parseKeyValue(table);
+                    } else {
+                        try self.parseKeyValue(&root);
+                    }
+                },
             }
         }
 
@@ -74,22 +83,19 @@ pub const Parser = struct {
             self.index += 1;
         }
     }
+
     fn parseTableHeader(self: *Self, root: *StringHashMap(TomlValue)) !void {
         self.index += 1; // Skip '['
         self.skipWhitespace();
 
         var name = ArrayList(u8).init(self.arena.allocator());
-        var in_table_name = true;
+        var inTableName = true;
 
-        while (self.index < self.source.len and in_table_name) {
+        while (self.index < self.source.len and inTableName) {
             const c = self.source[self.index];
             switch (c) {
                 ']' => {
-                    in_table_name = false;
-                    self.index += 1;
-                },
-                ' ', '\t' => {
-                    try name.append(c);
+                    inTableName = false;
                     self.index += 1;
                 },
                 else => {
@@ -99,18 +105,26 @@ pub const Parser = struct {
             }
         }
 
-        if (in_table_name) {
+        if (inTableName) {
             return TomlError.UnexpectedEOF;
         }
 
-        // Trim any trailing whitespace from the table name
-        var table_name = try name.toOwnedSlice();
-        while (table_name.len > 0 and (table_name[table_name.len - 1] == ' ' or table_name[table_name.len - 1] == '\t')) {
-            table_name = table_name[0 .. table_name.len - 1];
+        // Trim trailing whitespace
+        var tableName = try name.toOwnedSlice();
+        while (tableName.len > 0 and (tableName[tableName.len - 1] == ' ' or tableName[tableName.len - 1] == '\t')) {
+            tableName = tableName[0 .. tableName.len - 1];
         }
 
         const table = StringHashMap(TomlValue).init(self.arena.allocator());
-        try root.put(table_name, TomlValue{ .data = .{ .Table = table } });
+        try root.put(tableName, TomlValue{ .data = .{ .Table = table } });
+
+        // Update the current table to point to the newly created table
+        if (root.getPtr(tableName)) |tableValue| {
+            switch (tableValue.data) {
+                .Table => |*t| self.currentTable = t,
+                else => return TomlError.InvalidSyntax,
+            }
+        }
     }
 
     fn parseKeyValue(self: *Self, table: *StringHashMap(TomlValue)) !void {
@@ -125,14 +139,14 @@ pub const Parser = struct {
         }
 
         var key = ArrayList(u8).init(self.arena.allocator());
-        var found_equals = false;
+        var foundEquals = false;
 
         // Parse key
         while (self.index < self.source.len) : (self.index += 1) {
             const c = self.source[self.index];
             switch (c) {
                 '=' => {
-                    found_equals = true;
+                    foundEquals = true;
                     self.index += 1;
                     break;
                 },
@@ -143,7 +157,7 @@ pub const Parser = struct {
                         while (i < self.source.len) : (i += 1) {
                             switch (self.source[i]) {
                                 '=' => {
-                                    found_equals = true;
+                                    foundEquals = true;
                                     self.index = i + 1;
                                     break;
                                 },
@@ -151,7 +165,7 @@ pub const Parser = struct {
                                 else => break,
                             }
                         }
-                        if (found_equals) break;
+                        if (foundEquals) break;
                     }
                 },
                 '\n', '\r' => break,
@@ -159,7 +173,7 @@ pub const Parser = struct {
             }
         }
 
-        if (!found_equals or key.items.len == 0) {
+        if (!foundEquals or key.items.len == 0) {
             return TomlError.InvalidSyntax;
         }
 
@@ -274,13 +288,13 @@ pub const Parser = struct {
 
             // Parse key
             var key = ArrayList(u8).init(self.arena.allocator());
-            var found_equals = false;
+            var foundEquals = false;
 
             while (self.index < self.source.len) : (self.index += 1) {
                 const c = self.source[self.index];
                 switch (c) {
                     '=' => {
-                        found_equals = true;
+                        foundEquals = true;
                         self.index += 1;
                         break;
                     },
@@ -291,7 +305,7 @@ pub const Parser = struct {
                             while (i < self.source.len) : (i += 1) {
                                 switch (self.source[i]) {
                                     '=' => {
-                                        found_equals = true;
+                                        foundEquals = true;
                                         self.index = i + 1;
                                         break;
                                     },
@@ -299,7 +313,7 @@ pub const Parser = struct {
                                     else => break,
                                 }
                             }
-                            if (found_equals) break;
+                            if (foundEquals) break;
                         }
                     },
                     '}' => break,
@@ -308,7 +322,7 @@ pub const Parser = struct {
                 }
             }
 
-            if (!found_equals or key.items.len == 0) {
+            if (!foundEquals or key.items.len == 0) {
                 return TomlError.InvalidSyntax;
             }
 
@@ -399,6 +413,70 @@ fn isLikelyDateTime(source: []const u8) bool {
         source[4] == '-';
 }
 
+pub fn getValue(root: StringHashMap(TomlValue), path: []const []const u8) ?TomlValue {
+    if (path.len == 0) return null;
+
+    var currentValue: ?TomlValue = null;
+
+    // Get the first level value
+    if (root.get(path[0])) |value| {
+        currentValue = value;
+    } else {
+        return null;
+    }
+
+    // Navigate through the rest of the path
+    var i: usize = 1;
+    while (i < path.len) : (i += 1) {
+        if (currentValue) |value| {
+            switch (value.data) {
+                .Table => |table| {
+                    if (table.get(path[i])) |nextValue| {
+                        currentValue = nextValue;
+                    } else {
+                        return null;
+                    }
+                },
+                else => return null,
+            }
+        } else {
+            return null;
+        }
+    }
+
+    return currentValue;
+}
+
+pub fn printValue(value: TomlValue) void {
+    switch (value.data) {
+        .String => |str| std.debug.print("\"{s}\"", .{str}),
+        .Integer => |int| std.debug.print("{d}", .{int}),
+        .Float => |float| std.debug.print("{d}", .{float}),
+        .Boolean => |boolean| std.debug.print("{}", .{boolean}),
+        .DateTime => |dt| std.debug.print("{s}", .{dt}),
+        .Array => |array| {
+            std.debug.print("[", .{});
+            for (array, 0..) |item, i| {
+                printValue(item);
+                if (i < array.len - 1) std.debug.print(", ", .{});
+            }
+            std.debug.print("]", .{});
+        },
+        .Table => |table| {
+            std.debug.print("{{ ", .{});
+            var it = table.iterator();
+            var first = true;
+            while (it.next()) |entry| {
+                if (!first) std.debug.print(", ", .{});
+                first = false;
+                std.debug.print("{s}: ", .{entry.key_ptr.*});
+                printValue(entry.value_ptr.*);
+            }
+            std.debug.print(" }}", .{});
+        },
+    }
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
@@ -415,71 +493,18 @@ pub fn main() !void {
 
     const file_size = try file.getEndPos();
     const toml_content = try arena.allocator().alloc(u8, file_size);
-
-    const bytes_read = try file.readAll(toml_content);
-    if (bytes_read != file_size) {
-        std.debug.print("Error: Could not read entire file\n", .{});
-        std.process.exit(1);
-    }
+    _ = try file.readAll(toml_content);
 
     var parser = Parser.init(&arena, toml_content);
-    var result = try parser.parse();
+    const result = try parser.parse();
 
-    // Print all parsed values
-    var it = result.iterator();
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
-        const value = entry.value_ptr.*;
-
-        std.debug.print("\nSection: {s}\n", .{key});
-        switch (value.data) {
-            .Table => |table| {
-                var table_it = table.iterator();
-                while (table_it.next()) |table_entry| {
-                    const table_key = table_entry.key_ptr.*;
-                    const table_value = table_entry.value_ptr.*;
-
-                    std.debug.print("  {s} = ", .{table_key});
-                    switch (table_value.data) {
-                        .String => |str| std.debug.print("\"{s}\"", .{str}),
-                        .Integer => |int| std.debug.print("{d}", .{int}),
-                        .Float => |float| std.debug.print("{d}", .{float}),
-                        .Boolean => |boolean| std.debug.print("{}", .{boolean}),
-                        .DateTime => |dt| std.debug.print("{s}", .{dt}),
-                        .Array => |array| {
-                            std.debug.print("[", .{});
-                            for (array, 0..) |item, i| {
-                                switch (item.data) {
-                                    .Integer => |int| std.debug.print("{d}", .{int}),
-                                    .Float => |float| std.debug.print("{d}", .{float}),
-                                    .String => |str| std.debug.print("\"{s}\"", .{str}),
-                                    .Boolean => |boolean| std.debug.print("{}", .{boolean}),
-                                    .DateTime => |dt| std.debug.print("{s}", .{dt}),
-                                    .Array => std.debug.print("[...]", .{}),
-                                    .Table => std.debug.print("{{...}}", .{}),
-                                }
-                                if (i < array.len - 1) std.debug.print(", ", .{});
-                            }
-                            std.debug.print("]", .{});
-                        },
-                        .Table => |nested_table| {
-                            std.debug.print("{{ ", .{});
-                            var nested_it = nested_table.iterator();
-                            var first = true;
-                            while (nested_it.next()) |nested_entry| {
-                                if (!first) std.debug.print(", ", .{});
-                                first = false;
-                                std.debug.print("{s}: ...", .{nested_entry.key_ptr.*});
-                            }
-                            std.debug.print(" }}", .{});
-                        },
-                    }
-                    std.debug.print("\n", .{});
-                }
-            },
-            else => {
-                std.debug.print("  (non-table value at root level)\n", .{});
-            },
-        }
+    // Example: Get and print a specific value
+    const path = [_][]const u8{ "Engine Colors", "engineTwo" };
+    if (getValue(result, &path)) |value| {
+        std.debug.print("Value of engineTwo: ", .{});
+        printValue(value);
+        std.debug.print("\n", .{});
+    } else {
+        std.debug.print("Value not found\n", .{});
     }
 }
