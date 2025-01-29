@@ -85,7 +85,6 @@ pub const Parser = struct {
     }
 
     fn parseTableHeader(self: *Self, root: *StringHashMap(TomlValue)) !void {
-
         // Check if it's an array table
         const isArrayTable = self.index + 1 < self.source.len and self.source[self.index + 1] == '[';
 
@@ -126,33 +125,59 @@ pub const Parser = struct {
             tableName = tableName[0 .. tableName.len - 1];
         }
 
-        if (isArrayTable) {
-            const newTable = try self.arena.allocator().create(StringHashMap(TomlValue));
-            newTable.* = StringHashMap(TomlValue).init(self.arena.allocator());
+        // Split the table name into parts for nested tables
+        var parts = std.mem.splitSequence(u8, tableName, " ");
+        const mainTable = parts.next() orelse return TomlError.InvalidSyntax;
 
-            if (root.get(tableName)) |existing| {
-                switch (existing.data) {
-                    .Array => |arr| {
-                        var newArray = try self.arena.allocator().alloc(TomlValue, arr.len + 1);
-                        @memcpy(newArray[0..arr.len], arr);
-                        newArray[arr.len] = TomlValue{ .data = .{ .Table = newTable.* } };
-                        try root.put(tableName, TomlValue{ .data = .{ .Array = newArray } });
-                    },
-                    else => return TomlError.InvalidSyntax, // Existing value is not an array
+        // Get or create the main table
+        var parentValue = if (root.get(mainTable)) |existing|
+            existing
+        else blk: {
+            const newTable = StringHashMap(TomlValue).init(self.arena.allocator());
+            try root.put(mainTable, TomlValue{ .data = .{ .Table = newTable } });
+            break :blk root.get(mainTable).?;
+        };
+
+        var parentTable = &parentValue.data.Table;
+
+        // Navigate through table parts
+        while (parts.next()) |part| {
+            // Skip "vs" in table names
+            if (std.mem.eql(u8, part, "vs")) continue;
+
+            if (isArrayTable) {
+                const newTable = try self.arena.allocator().create(StringHashMap(TomlValue));
+                newTable.* = StringHashMap(TomlValue).init(self.arena.allocator());
+
+                if (parentTable.get(part)) |existing| {
+                    switch (existing.data) {
+                        .Array => |arr| {
+                            var newArray = try self.arena.allocator().alloc(TomlValue, arr.len + 1);
+                            @memcpy(newArray[0..arr.len], arr);
+                            newArray[arr.len] = TomlValue{ .data = .{ .Table = newTable.* } };
+                            try parentTable.put(part, TomlValue{ .data = .{ .Array = newArray } });
+                        },
+                        else => {
+                            var newArray = try self.arena.allocator().alloc(TomlValue, 1);
+                            newArray[0] = TomlValue{ .data = .{ .Table = newTable.* } };
+                            try parentTable.put(part, TomlValue{ .data = .{ .Array = newArray } });
+                        },
+                    }
+                } else {
+                    var newArray = try self.arena.allocator().alloc(TomlValue, 1);
+                    newArray[0] = TomlValue{ .data = .{ .Table = newTable.* } };
+                    try parentTable.put(part, TomlValue{ .data = .{ .Array = newArray } });
                 }
-            } else {
-                var newArray = try self.arena.allocator().alloc(TomlValue, 1);
-                newArray[0] = TomlValue{ .data = .{ .Table = newTable.* } };
-                try root.put(tableName, TomlValue{ .data = .{ .Array = newArray } });
-            }
 
-            self.currentTable = newTable;
-        } else {
-            // Handle regular table
-            const newTable = try self.arena.allocator().create(StringHashMap(TomlValue));
-            newTable.* = StringHashMap(TomlValue).init(self.arena.allocator());
-            try root.put(tableName, TomlValue{ .data = .{ .Table = newTable.* } });
-            self.currentTable = newTable;
+                self.currentTable = newTable;
+                parentTable = newTable;
+            } else {
+                const newTable = try self.arena.allocator().create(StringHashMap(TomlValue));
+                newTable.* = StringHashMap(TomlValue).init(self.arena.allocator());
+                try parentTable.put(part, TomlValue{ .data = .{ .Table = newTable.* } });
+                self.currentTable = newTable;
+                parentTable = newTable;
+            }
         }
     }
 
