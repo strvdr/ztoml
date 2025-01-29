@@ -85,8 +85,10 @@ pub const Parser = struct {
     }
 
     fn parseTableHeader(self: *Self, root: *StringHashMap(TomlValue)) !void {
+
         // Check if it's an array table
         const isArrayTable = self.index + 1 < self.source.len and self.source[self.index + 1] == '[';
+
         self.index += if (isArrayTable) 2 else 1; // Skip '[' or '[['
         self.skipWhitespace();
 
@@ -125,40 +127,32 @@ pub const Parser = struct {
         }
 
         if (isArrayTable) {
-            // Handle array table
-            var arrayOfTables: []TomlValue = undefined;
-            var newTable = StringHashMap(TomlValue).init(self.arena.allocator());
+            const newTable = try self.arena.allocator().create(StringHashMap(TomlValue));
+            newTable.* = StringHashMap(TomlValue).init(self.arena.allocator());
 
             if (root.get(tableName)) |existing| {
                 switch (existing.data) {
                     .Array => |arr| {
-                        // Extend existing array
                         var newArray = try self.arena.allocator().alloc(TomlValue, arr.len + 1);
                         @memcpy(newArray[0..arr.len], arr);
-                        newArray[arr.len] = TomlValue{ .data = .{ .Table = newTable } };
-                        arrayOfTables = newArray;
+                        newArray[arr.len] = TomlValue{ .data = .{ .Table = newTable.* } };
+                        try root.put(tableName, TomlValue{ .data = .{ .Array = newArray } });
                     },
                     else => return TomlError.InvalidSyntax, // Existing value is not an array
                 }
             } else {
-                // Create new array with one table
-                arrayOfTables = try self.arena.allocator().alloc(TomlValue, 1);
-                arrayOfTables[0] = TomlValue{ .data = .{ .Table = newTable } };
+                var newArray = try self.arena.allocator().alloc(TomlValue, 1);
+                newArray[0] = TomlValue{ .data = .{ .Table = newTable.* } };
+                try root.put(tableName, TomlValue{ .data = .{ .Array = newArray } });
             }
 
-            try root.put(tableName, TomlValue{ .data = .{ .Array = arrayOfTables } });
-            self.currentTable = &newTable;
+            self.currentTable = newTable;
         } else {
             // Handle regular table
-            const table = StringHashMap(TomlValue).init(self.arena.allocator());
-            try root.put(tableName, TomlValue{ .data = .{ .Table = table } });
-
-            if (root.getPtr(tableName)) |tableValue| {
-                switch (tableValue.data) {
-                    .Table => |*t| self.currentTable = t,
-                    else => return TomlError.InvalidSyntax,
-                }
-            }
+            const newTable = try self.arena.allocator().create(StringHashMap(TomlValue));
+            newTable.* = StringHashMap(TomlValue).init(self.arena.allocator());
+            try root.put(tableName, TomlValue{ .data = .{ .Table = newTable.* } });
+            self.currentTable = newTable;
         }
     }
 
@@ -522,8 +516,21 @@ pub fn main() !void {
     var arena = ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
 
+    // Get args
+    var args = try std.process.argsWithAllocator(gpa.allocator());
+    defer args.deinit();
+
+    // Skip program name
+    _ = args.skip();
+
+    // Get filename argument
+    const filename = args.next() orelse {
+        std.debug.print("Usage: ztoml <filename>\n", .{});
+        return error.MissingFilename;
+    };
+
     // Read the file
-    const file = try std.fs.cwd().openFile("./history.toml", .{});
+    const file = try std.fs.cwd().openFile(filename, .{});
     defer file.close();
 
     const file_size = try file.getEndPos();
@@ -531,7 +538,10 @@ pub fn main() !void {
     _ = try file.readAll(toml_content);
 
     var parser = Parser.init(&arena, toml_content);
-    const result = try parser.parse();
+    const result = parser.parse() catch |err| {
+        std.debug.print("Error parsing TOML: {}\n", .{err});
+        return err;
+    };
 
     _ = result;
 }
