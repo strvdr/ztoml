@@ -85,7 +85,9 @@ pub const Parser = struct {
     }
 
     fn parseTableHeader(self: *Self, root: *StringHashMap(TomlValue)) !void {
-        self.index += 1; // Skip '['
+        // Check if it's an array table
+        const isArrayTable = self.index + 1 < self.source.len and self.source[self.index + 1] == '[';
+        self.index += if (isArrayTable) 2 else 1; // Skip '[' or '[['
         self.skipWhitespace();
 
         var name = ArrayList(u8).init(self.arena.allocator());
@@ -95,8 +97,15 @@ pub const Parser = struct {
             const c = self.source[self.index];
             switch (c) {
                 ']' => {
+                    if (isArrayTable) {
+                        if (self.index + 1 >= self.source.len or self.source[self.index + 1] != ']') {
+                            return TomlError.InvalidSyntax;
+                        }
+                        self.index += 2; // Skip ']]'
+                    } else {
+                        self.index += 1; // Skip single ']'
+                    }
                     inTableName = false;
-                    self.index += 1;
                 },
                 else => {
                     try name.append(c);
@@ -115,14 +124,40 @@ pub const Parser = struct {
             tableName = tableName[0 .. tableName.len - 1];
         }
 
-        const table = StringHashMap(TomlValue).init(self.arena.allocator());
-        try root.put(tableName, TomlValue{ .data = .{ .Table = table } });
+        if (isArrayTable) {
+            // Handle array table
+            var arrayOfTables: []TomlValue = undefined;
+            var newTable = StringHashMap(TomlValue).init(self.arena.allocator());
 
-        // Update the current table to point to the newly created table
-        if (root.getPtr(tableName)) |tableValue| {
-            switch (tableValue.data) {
-                .Table => |*t| self.currentTable = t,
-                else => return TomlError.InvalidSyntax,
+            if (root.get(tableName)) |existing| {
+                switch (existing.data) {
+                    .Array => |arr| {
+                        // Extend existing array
+                        var newArray = try self.arena.allocator().alloc(TomlValue, arr.len + 1);
+                        @memcpy(newArray[0..arr.len], arr);
+                        newArray[arr.len] = TomlValue{ .data = .{ .Table = newTable } };
+                        arrayOfTables = newArray;
+                    },
+                    else => return TomlError.InvalidSyntax, // Existing value is not an array
+                }
+            } else {
+                // Create new array with one table
+                arrayOfTables = try self.arena.allocator().alloc(TomlValue, 1);
+                arrayOfTables[0] = TomlValue{ .data = .{ .Table = newTable } };
+            }
+
+            try root.put(tableName, TomlValue{ .data = .{ .Array = arrayOfTables } });
+            self.currentTable = &newTable;
+        } else {
+            // Handle regular table
+            const table = StringHashMap(TomlValue).init(self.arena.allocator());
+            try root.put(tableName, TomlValue{ .data = .{ .Table = table } });
+
+            if (root.getPtr(tableName)) |tableValue| {
+                switch (tableValue.data) {
+                    .Table => |*t| self.currentTable = t,
+                    else => return TomlError.InvalidSyntax,
+                }
             }
         }
     }
@@ -488,7 +523,7 @@ pub fn main() !void {
     defer arena.deinit();
 
     // Read the file
-    const file = try std.fs.cwd().openFile("./.config/zduel.toml", .{});
+    const file = try std.fs.cwd().openFile("./history.toml", .{});
     defer file.close();
 
     const file_size = try file.getEndPos();
@@ -498,13 +533,5 @@ pub fn main() !void {
     var parser = Parser.init(&arena, toml_content);
     const result = try parser.parse();
 
-    // Example: Get and print a specific value
-    const path = [_][]const u8{ "Engine Colors", "engineTwo" };
-    if (getValue(result, &path)) |value| {
-        std.debug.print("Value of engineTwo: ", .{});
-        printValue(value);
-        std.debug.print("\n", .{});
-    } else {
-        std.debug.print("Value not found\n", .{});
-    }
+    _ = result;
 }
