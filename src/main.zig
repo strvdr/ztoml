@@ -45,8 +45,12 @@ pub const Parser = struct {
         };
     }
 
+    fn allocator(self: *Self) Allocator {
+        return self.arena.allocator();
+    }
+
     pub fn parse(self: *Self) TomlError!StringHashMap(TomlValue) {
-        var root = StringHashMap(TomlValue).init(self.arena.allocator());
+        var root = StringHashMap(TomlValue).init(self.allocator());
         self.currentTable = null; // Start with no current table
 
         while (self.index < self.source.len) {
@@ -88,7 +92,7 @@ pub const Parser = struct {
         self.index += 1; // Skip '['
         self.skipWhitespace();
 
-        var name = ArrayList(u8).init(self.arena.allocator());
+        var name: ArrayList(u8) = .empty;
         var inTableName = true;
 
         while (self.index < self.source.len and inTableName) {
@@ -99,7 +103,7 @@ pub const Parser = struct {
                     self.index += 1;
                 },
                 else => {
-                    try name.append(c);
+                    try name.append(self.allocator(), c);
                     self.index += 1;
                 },
             }
@@ -110,12 +114,12 @@ pub const Parser = struct {
         }
 
         // Trim trailing whitespace
-        var tableName = try name.toOwnedSlice();
+        var tableName = try name.toOwnedSlice(self.allocator());
         while (tableName.len > 0 and (tableName[tableName.len - 1] == ' ' or tableName[tableName.len - 1] == '\t')) {
             tableName = tableName[0 .. tableName.len - 1];
         }
 
-        const table = StringHashMap(TomlValue).init(self.arena.allocator());
+        const table = StringHashMap(TomlValue).init(self.allocator());
         try root.put(tableName, TomlValue{ .data = .{ .Table = table } });
 
         // Update the current table to point to the newly created table
@@ -138,7 +142,7 @@ pub const Parser = struct {
             return;
         }
 
-        var key = ArrayList(u8).init(self.arena.allocator());
+        var key: ArrayList(u8) = .empty;
         var foundEquals = false;
 
         // Parse key
@@ -169,7 +173,7 @@ pub const Parser = struct {
                     }
                 },
                 '\n', '\r' => break,
-                else => try key.append(c),
+                else => try key.append(self.allocator(), c),
             }
         }
 
@@ -180,7 +184,7 @@ pub const Parser = struct {
         self.skipWhitespace();
 
         const value = try self.parseValue();
-        try table.put(try key.toOwnedSlice(), value);
+        try table.put(try key.toOwnedSlice(self.allocator()), value);
 
         // Skip to end of line
         while (self.index < self.source.len) : (self.index += 1) {
@@ -230,22 +234,22 @@ pub const Parser = struct {
 
     fn parseString(self: *Self) ![]const u8 {
         self.index += 1; // Skip opening quote
-        var str = ArrayList(u8).init(self.arena.allocator());
+        var str: ArrayList(u8) = .empty;
 
         while (self.index < self.source.len) : (self.index += 1) {
             const c = self.source[self.index];
             if (c == '"') {
                 self.index += 1;
-                return str.toOwnedSlice();
+                return str.toOwnedSlice(self.allocator());
             } else if (c == '\\') {
                 self.index += 1;
                 if (self.index >= self.source.len) {
                     return TomlError.UnexpectedEOF;
                 }
                 const escaped = try getEscapedChar(self.source[self.index]);
-                try str.append(escaped);
+                try str.append(self.allocator(), escaped);
             } else {
-                try str.append(c);
+                try str.append(self.allocator(), c);
             }
         }
 
@@ -254,7 +258,7 @@ pub const Parser = struct {
 
     fn parseArray(self: *Self) !TomlValue {
         self.index += 1; // Skip '['
-        var array = ArrayList(TomlValue).init(self.arena.allocator());
+        var array: ArrayList(TomlValue) = .empty;
 
         while (self.index < self.source.len) {
             self.skipWhitespace();
@@ -264,7 +268,7 @@ pub const Parser = struct {
             }
 
             const value = try self.parseValue();
-            try array.append(value);
+            try array.append(self.allocator(), value);
 
             self.skipWhitespace();
             if (self.source[self.index] == ',') {
@@ -272,12 +276,12 @@ pub const Parser = struct {
             }
         }
 
-        return TomlValue{ .data = .{ .Array = try array.toOwnedSlice() } };
+        return TomlValue{ .data = .{ .Array = try array.toOwnedSlice(self.allocator()) } };
     }
 
     fn parseInlineTable(self: *Self) !TomlValue {
         self.index += 1; // Skip '{'
-        var table = StringHashMap(TomlValue).init(self.arena.allocator());
+        var table = StringHashMap(TomlValue).init(self.allocator());
 
         while (self.index < self.source.len) {
             self.skipWhitespace();
@@ -287,7 +291,7 @@ pub const Parser = struct {
             }
 
             // Parse key
-            var key = ArrayList(u8).init(self.arena.allocator());
+            var key: ArrayList(u8) = .empty;
             var foundEquals = false;
 
             while (self.index < self.source.len) : (self.index += 1) {
@@ -318,7 +322,7 @@ pub const Parser = struct {
                     },
                     '}' => break,
                     ',' => break,
-                    else => try key.append(c),
+                    else => try key.append(self.allocator(), c),
                 }
             }
 
@@ -328,7 +332,7 @@ pub const Parser = struct {
 
             self.skipWhitespace();
             const value = try self.parseValue();
-            try table.put(try key.toOwnedSlice(), value);
+            try table.put(try key.toOwnedSlice(self.allocator()), value);
 
             self.skipWhitespace();
             if (self.index < self.source.len and self.source[self.index] == ',') {
@@ -340,33 +344,33 @@ pub const Parser = struct {
     }
 
     fn parseDateTime(self: *Self) ![]const u8 {
-        var str = ArrayList(u8).init(self.arena.allocator());
+        var str: ArrayList(u8) = .empty;
 
         while (self.index < self.source.len) : (self.index += 1) {
             const c = self.source[self.index];
             if (!isDateTimeChar(c)) break;
-            try str.append(c);
+            try str.append(self.allocator(), c);
         }
 
-        return str.toOwnedSlice();
+        return str.toOwnedSlice(self.allocator());
     }
 
     fn parseNumber(self: *Self) !TomlValue {
-        var str = ArrayList(u8).init(self.arena.allocator());
+        var str: ArrayList(u8) = .empty;
         var has_decimal = false;
 
         while (self.index < self.source.len) : (self.index += 1) {
             switch (self.source[self.index]) {
-                '0'...'9', '+', '-', 'e', 'E' => try str.append(self.source[self.index]),
+                '0'...'9', '+', '-', 'e', 'E' => try str.append(self.allocator(), self.source[self.index]),
                 '.' => {
                     has_decimal = true;
-                    try str.append(self.source[self.index]);
+                    try str.append(self.allocator(), self.source[self.index]);
                 },
                 else => break,
             }
         }
 
-        const num_str = try str.toOwnedSlice();
+        const num_str = try str.toOwnedSlice(self.allocator());
         return TomlValue{ .data = if (has_decimal)
             .{ .Float = try std.fmt.parseFloat(f64, num_str) }
         else
